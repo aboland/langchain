@@ -41,7 +41,7 @@ class SQLDatabase:
     def __init__(
         self,
         engine: Engine,
-        schema: Optional[str] = None,
+        schema: Optional[List[str]] = None,
         metadata: Optional[MetaData] = None,
         ignore_tables: Optional[List[str]] = None,
         include_tables: Optional[List[str]] = None,
@@ -61,9 +61,25 @@ class SQLDatabase:
 
         # including view support by adding the views as well as tables to the all
         # tables list if view_support is True
+        self._all_tables_per_schema = {}
+        if self._schema:
+            for sc in self._schema:
+                self._all_tables_per_schema[sc] = set(
+                    self._inspector.get_table_names(schema=sc)
+                    + (
+                        self._inspector.get_view_names(schema=sc)
+                        if view_support
+                        else []
+                    )
+                )
+        else:
+            self._all_tables_per_schema["base"] = set(
+                self._inspector.get_table_names()
+                + (self._inspector.get_view_names() if view_support else [])
+            )
+
         self._all_tables = set(
-            self._inspector.get_table_names(schema=schema)
-            + (self._inspector.get_view_names(schema=schema) if view_support else [])
+            value for values in self._all_tables_per_schema.values() for value in values
         )
 
         self._include_tables = set(include_tables) if include_tables else set()
@@ -108,12 +124,20 @@ class SQLDatabase:
 
         self._metadata = metadata or MetaData()
         # including view support if view_support = true
-        self._metadata.reflect(
-            views=view_support,
-            bind=self._engine,
-            only=list(self._usable_tables),
-            schema=self._schema,
-        )
+        if self._schema:
+            for sc in self._schema:
+                self._metadata.reflect(
+                    views=view_support,
+                    bind=self._engine,
+                    only=list(self._all_tables_per_schema[sc]),
+                    schema=sc,
+                )
+        else:
+            self._metadata.reflect(
+                views=view_support,
+                bind=self._engine,
+                only=list(self._all_tables_per_schema["base"]),
+            )
 
     @classmethod
     def from_uri(
@@ -336,15 +360,17 @@ class SQLDatabase:
 
         """
         with self._engine.begin() as connection:
-            if self._schema is not None:
+            if self._schema:
                 if self.dialect == "snowflake":
                     connection.exec_driver_sql(
-                        f"ALTER SESSION SET search_path='{self._schema}'"
+                        f"ALTER SESSION SET search_path='{', '.join(filter(None, self._schema))}'"
                     )
                 elif self.dialect == "bigquery":
                     connection.exec_driver_sql(f"SET @@dataset_id='{self._schema}'")
                 else:
-                    connection.exec_driver_sql(f"SET search_path TO {self._schema}")
+                    connection.exec_driver_sql(
+                        f"SET search_path TO {', '.join(filter(None, self._schema))}"
+                    )
             cursor = connection.execute(text(command))
             if cursor.returns_rows:
                 if fetch == "all":
